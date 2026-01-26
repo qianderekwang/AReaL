@@ -175,6 +175,16 @@ class SGLangBackend:
         }
         return HttpRequest(endpoint="/init_weights_update_group", payload=payload)
 
+    def build_awex_init_request(
+        self, meta: WeightUpdateMeta, engine_rank: int, num_engines: int
+    ) -> HttpRequest:
+        raise NotImplementedError("Awex is not supported for SGLang backend.")
+
+    def build_awex_update_request(
+        self, meta: WeightUpdateMeta, step_id: int, kwargs: dict | None
+    ) -> HttpRequest:
+        raise NotImplementedError("Awex is not supported for SGLang backend.")
+
     def get_pause_request(self) -> HttpRequest:
         """Get SGLang pause request."""
         return HttpRequest(endpoint="/pause_generation", payload={})
@@ -286,6 +296,15 @@ class RemoteSGLangEngine(InferenceEngine):
     def update_weights_from_disk(self, meta: WeightUpdateMeta) -> Future[None]:
         """Update weights from disk."""
         return self._engine.update_weights_from_disk(meta)
+
+    def update_weights_from_awex(
+        self,
+        meta: WeightUpdateMeta,
+        step_id: int | None = None,
+        kwargs: dict | None = None,
+    ) -> Future[None]:
+        """Update weights via Awex."""
+        raise NotImplementedError("Awex is not supported for SGLang backend.")
 
     def submit(
         self,

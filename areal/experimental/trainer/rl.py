@@ -25,6 +25,7 @@ from areal.api.cli_args import (
 )
 from areal.api.engine_api import InferenceEngine
 from areal.api.io_struct import FinetuneSpec, StepInfo, WeightUpdateMeta
+from areal.utils.model import get_model_update_meta
 from areal.api.scheduler_api import Scheduler
 from areal.api.workflow_api import AgentWorkflow, WorkflowLike
 from areal.controller import RolloutController
@@ -169,6 +170,8 @@ class PPOTrainer:
                         }
                     )
                 self.weight_update_meta = WeightUpdateMeta.from_fsdp_xccl(**xccl_kwargs)
+        elif self.config.actor.weight_update_mode == "awex":
+            self.weight_update_meta = get_model_update_meta(config)
         else:
             raise ValueError(
                 f"Invalid weight update mode: {self.config.actor.weight_update_mode}"

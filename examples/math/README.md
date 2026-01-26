@@ -22,3 +22,32 @@ are free to try out more of the hyperparameters listed below!
 - Max_new_tokens: 1024
 - Max_head_offpolicyness: 2
 - Training Time: ~35 minutes (batchsize 4), ~65 minutes (batchsize 8)
+
+## Awex GSM8K sample (single-controller)
+
+This repo defaults to single-controller mode (no launcher needed). A minimal Awex
+sample config is provided at `examples/math/gsm8k_grpo_awex_sample.yaml`, and the
+Awex-tuned script lives in `examples/math/gsm8k_rl_awex.py` (so the original
+`gsm8k_rl.py` stays generic).
+
+Run dense:
+```
+AREAL_GSM8K_MODEL=dense python examples/math/gsm8k_rl_awex.py --config examples/math/gsm8k_grpo_awex_sample.yaml
+```
+
+Run MoE (reduced checkpoint recommended for 16GB GPUs):
+```
+AREAL_GSM8K_MODEL=moe python examples/math/gsm8k_rl_awex.py --config examples/math/gsm8k_grpo_awex_sample.yaml
+```
+
+Notes:
+- The Awex meta server is started inside `gsm8k_rl_awex.py` when
+  `awex.meta_server_addr` is empty or set to `auto`.
+- Override model paths with `AREAL_GSM8K_DENSE_MODEL_PATH` or
+  `AREAL_GSM8K_MOE_MODEL_PATH` if needed.
+- For MoE, point `AREAL_GSM8K_MOE_MODEL_PATH` to a reduced checkpoint created with
+  `areal/tests/experimental/awex/build_reduced_qwen3_moe.py`. For 2x16GB GPUs,
+  a smaller variant like `--num-layers 1 --num-experts 2 --num-experts-per-tok 2`
+  is recommended.
+- For MoE, `gsm8k_rl_awex.py` applies low-memory overrides (batch size 1, max_new_tokens 32,
+  max_model_len 256, gradient checkpointing on). Tune in the script if needed.

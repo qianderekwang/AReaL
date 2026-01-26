@@ -415,6 +415,17 @@ class RolloutController:
             self._callback_loop.run_until_complete(self.update_weights_from_disk(meta))
             return jsonify({"status": "ok"})
 
+        @app.route("/callback/update_weights_awex", methods=["POST"])
+        def update_weights_awex():
+            payload = request.get_json() or {}
+            meta = deserialize_value(payload.get("meta"))
+            step_id = payload.get("step_id")
+            kwargs = deserialize_value(payload.get("kwargs"))
+            self._callback_loop.run_until_complete(
+                self.update_weights_from_awex(meta, step_id=step_id, kwargs=kwargs)
+            )
+            return jsonify({"status": "ok"})
+
         @app.route("/callback/pause_generation", methods=["POST"])
         def pause_generation():
             self._callback_loop.run_until_complete(self.pause_generation())
@@ -834,6 +845,16 @@ class RolloutController:
         meta.clear_checkpoint_after_load = False
         await self._collective_rpc_async("update_weights_from_disk", meta=meta)
         shutil.rmtree(meta.path, ignore_errors=True)
+
+    async def update_weights_from_awex(
+        self,
+        meta: WeightUpdateMeta,
+        step_id: int | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ):
+        await self._collective_rpc_async(
+            "update_weights_from_awex", meta=meta, step_id=step_id, kwargs=kwargs
+        )
 
     async def pause_generation(self):
         await self._collective_rpc_async("pause_generation")

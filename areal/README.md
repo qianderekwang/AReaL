@@ -49,6 +49,37 @@ areal/
 └── workflow/      # Custom RL rollout workflows
 ```
 
+### Testing Notes
+
+- Awex Megatron ↔ vLLM integration test:
+  - `areal/tests/test_awex_megatron_vllm_integration.py`
+  - Requires vLLM + awex plugin and at least 2 GPUs.
+  - Run (dense model):
+    - `AREAL_AWEX_DENSE_MODEL_PATH=/home/model/Qwen3-0.6B pytest areal/tests/test_awex_megatron_vllm_integration.py -k awex -v`
+  - Run (MoE reduced checkpoint, real-weight validation):
+    - Build a reduced checkpoint (2 layers, 8 experts):
+      - `python areal/tests/experimental/awex/build_reduced_qwen3_moe.py --input /home/model/Qwen3-30B-A3B-Instruct-2507 --output /home/model/Qwen3-30B-A3B-Instruct-2507-reduced-l2-e8 --num-layers 2 --num-experts 8 --num-experts-per-tok 2`
+    - Then run the test:
+      - `AREAL_AWEX_MOE_MODEL_PATH=/home/model/Qwen3-30B-A3B-Instruct-2507-reduced-l2-e8 AREAL_AWEX_MODEL=moe pytest areal/tests/test_awex_megatron_vllm_integration.py -k awex -v`
+- Awex weight update micro-benchmark (end-to-end update latency):
+  - `areal/tests/experimental/awex/bench_weight_transfer.py`
+  - Supports `awex_nccl`, `awex_file`, and `xccl` modes.
+  - Run (dense):
+    - `AREAL_AWEX_DENSE_MODEL_PATH=/home/model/Qwen3-0.6B python areal/tests/experimental/awex/bench_weight_transfer.py --modes awex_nccl,awex_file,xccl --iters 4 --warmup 1 --model-kind dense`
+  - Run (MoE reduced checkpoint):
+    - `AREAL_AWEX_MOE_MODEL_PATH=/home/model/Qwen3-30B-A3B-Instruct-2507-reduced-l2-e8 python areal/tests/experimental/awex/bench_weight_transfer.py --modes awex_nccl,awex_file,xccl --iters 4 --warmup 1 --model-kind moe`
+
+**Awex Bench Results (2026-01-26)** (2x RTX 4080 16GB, iters=4, warmup=1)
+
+| Model | Mode | Mean (s) | P50 (s) | Min (s) | Max (s) |
+| --- | --- | --- | --- | --- | --- |
+| Dense (Qwen3‑0.6B) | awex_nccl | 0.196 | 0.195 | 0.195 | 0.197 |
+| Dense (Qwen3‑0.6B) | xccl | 0.205 | 0.205 | 0.203 | 0.206 |
+| Dense (Qwen3‑0.6B) | awex_file (/tmp) | 1.208 | 1.205 | 1.179 | 1.245 |
+| MoE (2‑layer reduced) | awex_nccl | 0.234 | 0.234 | 0.234 | 0.235 |
+| MoE (2‑layer reduced) | xccl | 0.263 | 0.263 | 0.262 | 0.264 |
+| MoE (2‑layer reduced) | awex_file (/tmp) | 1.601 | 1.586 | 1.575 | 1.658 |
+
 ### Component Overview
 
 The AReaL codebase is structured into four distinct layers: API, backend, customization,
@@ -352,6 +383,14 @@ class TrainEngine(abc.ABC):
         """Execute gradient-free forward pass for inference."""
         raise NotImplementedError()
 ```
+
+##### Awex Weight Updates
+
+AReaL can use Awex for Megatron → vLLM weight synchronization. Set
+`actor.weight_update_mode="awex"` and provide the Awex meta server + backend
+settings in the top-level `awex` config block. When using vLLM, enable the Awex
+plugin by setting `VLLM_PLUGINS=awex_adapter` (or launch the server via
+`python -m awex.awex_vllm_server`).
 
 #### Algorithm Level: Extended Engines
 

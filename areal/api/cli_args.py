@@ -789,7 +789,10 @@ class TrainEngineConfig:
 
     weight_update_mode: str = field(
         default="xccl",
-        metadata={"help": "Weight update backend type.", "choices": ["disk", "xccl"]},
+        metadata={
+            "help": "Weight update backend type.",
+            "choices": ["disk", "xccl", "awex"],
+        },
     )
     fsdp: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
     archon: ArchonEngineConfig = field(default_factory=ArchonEngineConfig)
@@ -1056,6 +1059,7 @@ class vLLMConfig:
     enforce_eager: bool = False
     dtype: str = "bfloat16"
     distributed_executor_backend: str = "mp"
+    load_format: str = "auto"
     # original
     max_num_seqs: int = 256
     # kv_cache_type: str = "auto"
@@ -1103,7 +1107,6 @@ class vLLMConfig:
         args = dict(
             # Model and tokenizer
             tokenizer=vllm_config.model,
-            load_format="auto",
             trust_remote_code=True,
             tensor_parallel_size=tp_size,
             pipeline_parallel_size=pp_size,
@@ -1311,6 +1314,67 @@ class SGLangConfig:
         if is_version_less("sglang", "0.4.10.post2"):
             args.pop("max_loaded_loras", None)
         return args
+
+
+@dataclass
+class AwexConfig:
+    """Configuration for Awex weight updates."""
+
+    meta_server_addr: str = field(
+        default="",
+        metadata={"help": "Awex meta server address, e.g. 127.0.0.1:12345."},
+    )
+    comm_backend: str = field(
+        default="file",
+        metadata={"help": "Awex comm backend. Options: file/nccl/astate."},
+    )
+    weights_exchange_ipc_backend: str = field(
+        default="cuda",
+        metadata={"help": "IPC backend for Awex weights exchange."},
+    )
+    weights_comm_nccl_group_size: int = field(
+        default=1,
+        metadata={"help": "NCCL group size for Awex weights exchange."},
+    )
+    enable_debug_mode: bool = field(
+        default=False, metadata={"help": "Enable Awex debug mode."}
+    )
+    debug_mode_config: dict[str, Any] = field(
+        default_factory=dict,
+        metadata={"help": "Extra debug config passed to Awex."},
+    )
+    disable_weights_exchange_pipeline: bool = field(
+        default=False,
+        metadata={"help": "Disable Awex pipelined weights exchange."},
+    )
+    enable_colocate_mode: bool = field(
+        default=False,
+        metadata={"help": "Enable Awex colocate mode."},
+    )
+    weights_validation_steps: int = field(
+        default=0,
+        metadata={"help": "Number of steps to validate weights on inference side."},
+    )
+    validate_weights_every_n_steps: int = field(
+        default=1,
+        metadata={"help": "Validate weights every N steps when enabled."},
+    )
+    dump_weights_list_for_validation: list[str] = field(
+        default_factory=list,
+        metadata={"help": "List of parameter names to dump for validation."},
+    )
+    dump_weights_dir_for_validation: str = field(
+        default="",
+        metadata={"help": "Directory to dump weights for validation."},
+    )
+    nnodes: int | None = field(
+        default=None,
+        metadata={"help": "Total number of nodes for vLLM server (optional)."},
+    )
+    node_rank: int | None = field(
+        default=None,
+        metadata={"help": "Node rank for vLLM server (optional)."},
+    )
 
 
 @dataclass
@@ -1861,6 +1925,7 @@ class BaseExperimentConfig:
 
     sglang: SGLangConfig = field(default_factory=SGLangConfig)
     vllm: vLLMConfig = field(default_factory=vLLMConfig)
+    awex: AwexConfig = field(default_factory=AwexConfig)
 
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
 
