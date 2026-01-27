@@ -53,18 +53,6 @@ ENV MAX_JOBS=32
 # Set VIRTUAL_ENV so uv pip install targets the venv created below
 ENV VIRTUAL_ENV=/AReaL/.venv
 
-# Install Node.js via nvm and Claude Code
-ENV NVM_DIR=/root/.nvm
-ENV NODE_VERSION=22
-RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash \
-    && . "$NVM_DIR/nvm.sh" \
-    && nvm install $NODE_VERSION \
-    && nvm use $NODE_VERSION \
-    && nvm alias default $NODE_VERSION \
-    && npm install -g npm@latest \
-    && curl -fsSL https://claude.ai/install.sh | bash
-ENV PATH="$NVM_DIR/versions/node/v$NODE_VERSION/bin:/root/.local/bin:$PATH"
-
 ##############################################################
 # STAGE 1: Install base torch FIRST
 # Torch rarely changes and is needed for C++ compilation
@@ -111,6 +99,25 @@ RUN git clone https://github.com/Dao-AILab/flash-attention -b v2.8.3 /flash-atte
     && cp /flash-attention/hopper/flash_attn_interface.py $VIRTUAL_ENV/lib/python3.12/site-packages/flash_attn_3/ \
     && touch $VIRTUAL_ENV/lib/python3.12/site-packages/flash_attn_3/__init__.py \
     && rm -rf /flash-attention
+
+##############################################################
+# STAGE 2.5: Install Node.js and npm-based tools
+##############################################################
+
+# Install Node.js via fnm and Claude Code
+ENV FNM_DIR=/root/.fnm
+ENV NODE_VERSION=22
+ENV PATH="$FNM_DIR/aliases/default/bin:/root/.local/bin:$PATH"
+RUN apt-get update && apt-get install -y unzip \
+    && curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$FNM_DIR" --skip-shell \
+    && eval "$($FNM_DIR/fnm env --shell bash)" \
+    && $FNM_DIR/fnm install $NODE_VERSION \
+    && $FNM_DIR/fnm default $NODE_VERSION \
+    && npm install -g npm@latest \
+    && curl -fsSL https://claude.ai/install.sh | bash \
+    && curl -fsSL https://opencode.ai/install | bash \
+    && npm install -g @openai/codex \
+    && npm install -g @google/gemini-cli
 
 ##############################################################
 # STAGE 3: Install project dependencies from pyproject.toml
