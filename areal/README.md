@@ -49,6 +49,15 @@ areal/
 └── workflow/      # Custom RL rollout workflows
 ```
 
+### Awex (Experimental)
+
+Awex-related integration tests, benchmark scripts, and reduced-model helpers are
+maintained under:
+
+- `areal/tests/experimental/awex/README.md`
+- `examples/experimental/awex/README.md`
+
+
 ### Component Overview
 
 The AReaL codebase is structured into four distinct layers: API, backend, customization,
@@ -352,6 +361,14 @@ class TrainEngine(abc.ABC):
         """Execute gradient-free forward pass for inference."""
         raise NotImplementedError()
 ```
+
+##### Awex Weight Updates
+
+AReaL can use Awex for Megatron → vLLM weight synchronization. Set
+`actor.weight_update_mode="awex"` and provide the Awex meta server + backend
+settings in the top-level `awex` config block. When using vLLM, enable the Awex
+plugin by setting `VLLM_PLUGINS=awex_adapter` (or launch the server via
+`python -m awex.awex_vllm_server`).
 
 #### Algorithm Level: Extended Engines
 

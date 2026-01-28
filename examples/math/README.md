@@ -22,3 +22,11 @@ are free to try out more of the hyperparameters listed below!
 - Max_new_tokens: 1024
 - Max_head_offpolicyness: 2
 - Training Time: ~35 minutes (batchsize 4), ~65 minutes (batchsize 8)
+
+## Awex Example Location
+
+Awex-specific GSM8K sample scripts were moved to:
+
+- `examples/experimental/awex/README.md`
+- `examples/experimental/awex/gsm8k_rl_awex.py`
+- `examples/experimental/awex/gsm8k_grpo_awex_sample.yaml`
