@@ -7,6 +7,10 @@ import os
 import queue
 import threading
 import tempfile
+import time
+import json
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 
 import pytest
@@ -35,21 +39,74 @@ DENSE_HF_ID = "Qwen/Qwen3-0.6B"
 DENSE_LOCAL_PATH = "/home/model/Qwen3-0.6B/"
 MOE_LOCAL_PATH = "/home/model/Qwen3-30B-A3B-Instruct-2507-reduced-l2-e8"
 
+# Avoid MindSpeed transformer_config_init_wrapper get sys args which might translate to ''
+import sys
+sys.argv = [sys.argv[0]]
+
+def _env_int(name: str, default: int) -> int:
+    return int(os.environ.get(name, str(default)))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    return float(os.environ.get(name, str(default)))
+
+
+def _env_csv(name: str) -> list[str]:
+    raw = os.environ.get(name, "")
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 # === Parallel configuration (edit to test multi-GPU) ===
 # Training-side parallelism (Megatron).
-TRAIN_TP_SIZE = 1
-TRAIN_PP_SIZE = 1
-TRAIN_DP_SIZE = 1
-TRAIN_CP_SIZE = 1
-TRAIN_EP_SIZE = 1
-TRAIN_ETP_SIZE = 1
+TRAIN_TP_SIZE = _env_int("AREAL_AWEX_TRAIN_TP_SIZE", 1)
+TRAIN_PP_SIZE = _env_int("AREAL_AWEX_TRAIN_PP_SIZE", 1)
+TRAIN_DP_SIZE = _env_int("AREAL_AWEX_TRAIN_DP_SIZE", 1)
+TRAIN_CP_SIZE = _env_int("AREAL_AWEX_TRAIN_CP_SIZE", 1)
+TRAIN_EP_SIZE = _env_int("AREAL_AWEX_TRAIN_EP_SIZE", 1)
+TRAIN_ETP_SIZE = _env_int("AREAL_AWEX_TRAIN_ETP_SIZE", 1)
 
 # Inference-side parallelism (vLLM).
-VLLM_TP_SIZE = 1
-VLLM_PP_SIZE = 1
+VLLM_TP_SIZE = _env_int("AREAL_AWEX_VLLM_TP_SIZE", 1)
+VLLM_PP_SIZE = _env_int("AREAL_AWEX_VLLM_PP_SIZE", 1)
 # Optional vLLM data/expert parallel settings (internal DP on a single server).
-VLLM_DATA_PARALLEL_SIZE = 1
-VLLM_ENABLE_EXPERT_PARALLEL = False
+VLLM_DATA_PARALLEL_SIZE = _env_int("AREAL_AWEX_VLLM_DP_SIZE", 1)
+VLLM_ENABLE_EXPERT_PARALLEL = _env_bool("AREAL_AWEX_VLLM_ENABLE_EP", False)
+VLLM_ENABLE_EPLB = _env_bool("AREAL_AWEX_VLLM_ENABLE_EPLB", False)
+VLLM_EXPERT_PLACEMENT_STRATEGY = os.environ.get(
+    "AREAL_AWEX_VLLM_EXPERT_PLACEMENT_STRATEGY", ""
+).strip()
+VLLM_EPLB_WINDOW_SIZE = _env_int("AREAL_AWEX_VLLM_EPLB_WINDOW_SIZE", 8)
+VLLM_EPLB_STEP_INTERVAL = _env_int("AREAL_AWEX_VLLM_EPLB_STEP_INTERVAL", 4)
+VLLM_EPLB_NUM_REDUNDANT_EXPERTS = _env_int(
+    "AREAL_AWEX_VLLM_EPLB_NUM_REDUNDANT_EXPERTS", 0
+)
+VLLM_EPLB_LOG_BALANCEDNESS = _env_bool(
+    "AREAL_AWEX_VLLM_EPLB_LOG_BALANCEDNESS", True
+)
+VLLM_NUM_ENGINES = _env_int("AREAL_AWEX_VLLM_NUM_ENGINES", 1)
+NUM_UPDATES = _env_int("AREAL_AWEX_NUM_UPDATES", 1)
+REQUESTS_PER_UPDATE = _env_int("AREAL_AWEX_REQUESTS_PER_UPDATE", 0)
+REQUEST_TIMEOUT_S = _env_int("AREAL_AWEX_REQUEST_TIMEOUT_S", 30)
+REQUEST_RETRIES = _env_int("AREAL_AWEX_REQUEST_RETRIES", 3)
+STRICT_REQUEST_TRAFFIC = _env_bool("AREAL_AWEX_STRICT_REQUEST_TRAFFIC", False)
+ENGINE_REQUEST_TIMEOUT_S = _env_int("AREAL_AWEX_ENGINE_REQUEST_TIMEOUT_S", 60)
+ENGINE_SETUP_TIMEOUT_S = _env_int("AREAL_AWEX_ENGINE_SETUP_TIMEOUT_S", 360)
+VLLM_GPU_MEMORY_UTILIZATION = _env_float(
+    "AREAL_AWEX_VLLM_GPU_MEMORY_UTILIZATION", 0.6
+)
+VLLM_MAX_NUM_SEQS = _env_int("AREAL_AWEX_VLLM_MAX_NUM_SEQS", 1)
+VLLM_MAX_MODEL_LEN = _env_int("AREAL_AWEX_VLLM_MAX_MODEL_LEN", 128)
+TRAIN_CLUSTER_ID = os.environ.get("AREAL_AWEX_TRAIN_CLUSTER_ID", "").strip() or None
+VLLM_CLUSTER_IDS = _env_csv("AREAL_AWEX_VLLM_CLUSTER_IDS")
 
 # vLLM instances to launch (edit for multi-engine setups).
 # Each instance can define its own tp/pp sizes and device list (IDs in visible list).
@@ -58,16 +115,37 @@ VLLM_ENABLE_EXPERT_PARALLEL = False
 # Optional "engine_rank" controls ordering (default: list order). If provided, it
 # must be unique and contiguous starting from 0.
 # If all devices are None, they will be auto-assigned after training devices.
-VLLM_INSTANCES: list[dict] = [
-    {
-        "tp_size": VLLM_TP_SIZE,
-        "pp_size": VLLM_PP_SIZE,
-        "devices": None,
-        "engine_rank": 0,
-        "data_parallel_size": VLLM_DATA_PARALLEL_SIZE,
-        "enable_expert_parallel": VLLM_ENABLE_EXPERT_PARALLEL,
-    },
-]
+if VLLM_NUM_ENGINES < 1:
+    raise RuntimeError("AREAL_AWEX_VLLM_NUM_ENGINES must be >= 1.")
+if VLLM_CLUSTER_IDS and len(VLLM_CLUSTER_IDS) != VLLM_NUM_ENGINES:
+    raise RuntimeError(
+        "AREAL_AWEX_VLLM_CLUSTER_IDS must have exactly "
+        f"{VLLM_NUM_ENGINES} items, got {len(VLLM_CLUSTER_IDS)}."
+    )
+
+VLLM_INSTANCES: list[dict] = []
+for engine_idx in range(VLLM_NUM_ENGINES):
+    VLLM_INSTANCES.append(
+        {
+            "tp_size": VLLM_TP_SIZE,
+            "pp_size": VLLM_PP_SIZE,
+            "devices": None,
+            "engine_rank": engine_idx,
+            "data_parallel_size": VLLM_DATA_PARALLEL_SIZE,
+            "enable_expert_parallel": VLLM_ENABLE_EXPERT_PARALLEL,
+            "enable_eplb": VLLM_ENABLE_EPLB,
+            "expert_placement_strategy": VLLM_EXPERT_PLACEMENT_STRATEGY or None,
+            "awex_cluster_id": (
+                VLLM_CLUSTER_IDS[engine_idx] if VLLM_CLUSTER_IDS else None
+            ),
+            "eplb_config": {
+                "window_size": VLLM_EPLB_WINDOW_SIZE,
+                "step_interval": VLLM_EPLB_STEP_INTERVAL,
+                "num_redundant_experts": VLLM_EPLB_NUM_REDUNDANT_EXPERTS,
+                "log_balancedness": VLLM_EPLB_LOG_BALANCEDNESS,
+            },
+        }
+    )
 
 
 def _detect_device_backend() -> str:
@@ -153,8 +231,27 @@ def _build_vllm_instances() -> list[dict]:
         enable_expert_parallel = bool(
             inst.get("enable_expert_parallel", VLLM_ENABLE_EXPERT_PARALLEL)
         )
+        enable_eplb = bool(inst.get("enable_eplb", VLLM_ENABLE_EPLB))
+        expert_placement_strategy = (
+            (inst.get("expert_placement_strategy") or VLLM_EXPERT_PLACEMENT_STRATEGY)
+            or None
+        )
+        awex_cluster_id = str(inst.get("awex_cluster_id", "") or "").strip() or None
+        eplb_config = inst.get("eplb_config")
+        if eplb_config is None:
+            eplb_config = {
+                "window_size": VLLM_EPLB_WINDOW_SIZE,
+                "step_interval": VLLM_EPLB_STEP_INTERVAL,
+                "num_redundant_experts": VLLM_EPLB_NUM_REDUNDANT_EXPERTS,
+                "log_balancedness": VLLM_EPLB_LOG_BALANCEDNESS,
+            }
         if data_parallel_size < 1:
             raise RuntimeError("data_parallel_size must be >= 1.")
+        if enable_eplb and tp_size == 1 and data_parallel_size == 1:
+            raise RuntimeError(
+                "EPLB requires vLLM TP>1 or DP>1. "
+                f"Got tp_size={tp_size}, data_parallel_size={data_parallel_size}."
+            )
         world_size = tp_size * pp_size * data_parallel_size
         if devices is not None and len(devices) != world_size:
             raise RuntimeError(
@@ -169,6 +266,10 @@ def _build_vllm_instances() -> list[dict]:
                 "engine_rank": engine_rank,
                 "data_parallel_size": data_parallel_size,
                 "enable_expert_parallel": enable_expert_parallel,
+                "enable_eplb": enable_eplb,
+                "expert_placement_strategy": expert_placement_strategy,
+                "awex_cluster_id": awex_cluster_id,
+                "eplb_config": eplb_config,
                 "world_size": world_size,
             }
         )
@@ -196,6 +297,97 @@ def _temp_env(overrides: dict[str, str]):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _http_get_json(url: str, timeout_s: int) -> dict:
+    request = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        body = response.read().decode("utf-8")
+    return json.loads(body) if body else {}
+
+
+def _http_post_json(url: str, payload: dict, timeout_s: int) -> dict:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        raw = response.read().decode("utf-8")
+    return json.loads(raw) if raw else {}
+
+
+def _discover_model_id(server_addr: str, fallback_model: str, timeout_s: int) -> str:
+    try:
+        payload = _http_get_json(f"http://{server_addr}/v1/models", timeout_s)
+        models = payload.get("data") or []
+        if models and isinstance(models[0], dict):
+            model_id = models[0].get("id")
+            if model_id:
+                return str(model_id)
+    except Exception as exc:
+        print(
+            f"[awex-test] failed to discover model id on {server_addr}: {exc}. "
+            f"fallback to {fallback_model}",
+            flush=True,
+        )
+    return fallback_model
+
+
+def _drive_completion_traffic(
+    *,
+    server_addrs: list[str],
+    fallback_model: str,
+    requests_per_update: int,
+    timeout_s: int,
+    retries: int,
+    strict: bool,
+) -> None:
+    if requests_per_update <= 0:
+        return
+    model_ids = {
+        addr: _discover_model_id(addr, fallback_model=fallback_model, timeout_s=timeout_s)
+        for addr in server_addrs
+    }
+    for server_addr in server_addrs:
+        model_id = model_ids[server_addr]
+        for req_idx in range(requests_per_update):
+            payload = {
+                "model": model_id,
+                "prompt": f"awex eplb trigger request {req_idx}",
+                "max_tokens": 8,
+                "temperature": 0.0,
+            }
+            last_error = None
+            for attempt in range(1, max(1, retries) + 1):
+                try:
+                    _http_post_json(
+                        f"http://{server_addr}/v1/completions",
+                        payload=payload,
+                        timeout_s=timeout_s,
+                    )
+                    last_error = None
+                    break
+                except (
+                    TimeoutError,
+                    urllib.error.HTTPError,
+                    urllib.error.URLError,
+                    json.JSONDecodeError,
+                    RuntimeError,
+                ) as exc:
+                    last_error = exc
+                    time.sleep(min(1.0 * attempt, 3.0))
+            if last_error is not None:
+                message = (
+                    f"[awex-test] completion traffic failed on {server_addr} after "
+                    f"{max(1, retries)} attempts: {last_error}"
+                )
+                if strict:
+                    raise RuntimeError(message) from last_error
+                print(message, flush=True)
+                return
 
 
 def _run_awex_integration(result_queue, model_path: str):
@@ -282,17 +474,14 @@ def _run_awex_integration(result_queue, model_path: str):
         vllm_config = vLLMConfig(
             skip_tokenizer_init=False,
             model=model_path,
-            gpu_memory_utilization=0.6,
-            max_num_seqs=1,
-            max_model_len=128,
+            gpu_memory_utilization=VLLM_GPU_MEMORY_UTILIZATION,
+            max_num_seqs=VLLM_MAX_NUM_SEQS,
+            max_model_len=VLLM_MAX_MODEL_LEN,
             enforce_eager=True,
-            load_format="auto",
+            # load_format="auto",
         )
 
         vllm_env_base = {
-            "VLLM_PLUGINS": (
-                "awex_adapter,ascend" if device_backend == "npu" else "awex_adapter"
-            ),
             "AWEX_DEVICE_TYPE": device_backend,
         }
 
@@ -304,8 +493,8 @@ def _run_awex_integration(result_queue, model_path: str):
             temp_config = InferenceEngineConfig(
                 experiment_name="test_awex_megatron_vllm",
                 trial_name="trial_0",
-                setup_timeout=360,
-                request_timeout=60,
+                setup_timeout=ENGINE_SETUP_TIMEOUT_S,
+                request_timeout=ENGINE_REQUEST_TIMEOUT_S,
             )
             inf_engine = RemotevLLMEngine(temp_config)
 
@@ -351,6 +540,8 @@ def _run_awex_integration(result_queue, model_path: str):
             ft_spec = FinetuneSpec(total_train_epochs=1, dataset_size=128, train_batch_size=2)
             train_engine.initialize(addr=None, ft_spec=ft_spec)
             train_engine.set_version(1)
+            if TRAIN_CLUSTER_ID:
+                os.environ["AWEX_CLUSTER_ID"] = TRAIN_CLUSTER_ID
 
             if rank == 0:
                 meta_ip, meta_port = start_meta_server()
@@ -373,6 +564,14 @@ def _run_awex_integration(result_queue, model_path: str):
                         "data_parallel_size": inst.get("data_parallel_size"),
                         "enable_expert_parallel": inst.get("enable_expert_parallel"),
                     }
+                    if inst.get("enable_eplb"):
+                        vllm_extra_args["enable_eplb"] = True
+                        vllm_extra_args["eplb_config"] = json.dumps(
+                            inst.get("eplb_config") or {}
+                        )
+                    placement = inst.get("expert_placement_strategy")
+                    if placement:
+                        vllm_extra_args["expert_placement_strategy"] = placement
                     vllm_args.update(vllm_extra_args)
                     vllm_env = {
                         _visible_env_name(device_backend): ",".join(
@@ -380,6 +579,9 @@ def _run_awex_integration(result_queue, model_path: str):
                         ),
                         **vllm_env_base,
                     }
+                    cluster_id = inst.get("awex_cluster_id")
+                    if cluster_id:
+                        vllm_env["AWEX_CLUSTER_ID"] = str(cluster_id)
                     with _temp_env(vllm_env):
                         server_infos.append(inf_engine.launch_server(vllm_args))
                 # RemoteInfEngine assigns engine_rank by the order of server_addrs.
@@ -419,9 +621,27 @@ def _run_awex_integration(result_queue, model_path: str):
                     update_meta.path = obj_list[0]
 
             train_engine.connect_engine(inf_engine, update_meta)
-            if dist.is_initialized():
-                dist.barrier()
-            train_engine.update_weights(update_meta)
+            for step in range(1, max(1, NUM_UPDATES) + 1):
+                train_engine.set_version(step)
+                inf_engine.set_version(step)
+                if dist.is_initialized():
+                    dist.barrier()
+                train_engine.update_weights(update_meta)
+                if dist.is_initialized():
+                    dist.barrier()
+                if (
+                    rank == 0
+                    and REQUESTS_PER_UPDATE > 0
+                    and step < max(1, NUM_UPDATES)
+                ):
+                    _drive_completion_traffic(
+                        server_addrs=server_addrs,
+                        fallback_model=model_path,
+                        requests_per_update=REQUESTS_PER_UPDATE,
+                        timeout_s=max(1, REQUEST_TIMEOUT_S),
+                        retries=max(1, REQUEST_RETRIES),
+                        strict=STRICT_REQUEST_TRAFFIC,
+                    )
 
             if result_queue is not None and rank == 0:
                 result_queue.put(("ok", None))
@@ -490,7 +710,7 @@ def test_awex_megatron_to_vllm_nccl(tmp_path_factory):
     if not IS_AWEX_INSTALLED:
         pytest.skip("awex is not installed")
 
-    timeout_seconds = 60
+    timeout_seconds = int(os.environ.get("AREAL_AWEX_TEST_TIMEOUT_S", "600"))
     model_kind = os.environ.get("AREAL_AWEX_MODEL", "dense").lower()
     if model_kind == "moe":
         model_path = _resolve_moe_model_path()
