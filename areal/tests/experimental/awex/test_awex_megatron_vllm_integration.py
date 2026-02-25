@@ -92,8 +92,27 @@ VLLM_EPLB_NUM_REDUNDANT_EXPERTS = _env_int(
 VLLM_EPLB_LOG_BALANCEDNESS = _env_bool(
     "AREAL_AWEX_VLLM_EPLB_LOG_BALANCEDNESS", True
 )
+# NPU(vllm-ascend) EPLB knobs. Keep GPU-style knobs above for CUDA vLLM.
+VLLM_EPLB_DYNAMIC = _env_bool("AREAL_AWEX_VLLM_EPLB_DYNAMIC", True)
+VLLM_EPLB_EXPERT_HEAT_COLLECTION_INTERVAL = _env_int(
+    "AREAL_AWEX_VLLM_EPLB_EXPERT_HEAT_COLLECTION_INTERVAL",
+    VLLM_EPLB_WINDOW_SIZE,
+)
+VLLM_EPLB_ALGORITHM_EXECUTION_INTERVAL = _env_int(
+    "AREAL_AWEX_VLLM_EPLB_ALGORITHM_EXECUTION_INTERVAL",
+    VLLM_EPLB_STEP_INTERVAL,
+)
+VLLM_EPLB_EXPERT_MAP_PATH = (
+    os.environ.get("AREAL_AWEX_VLLM_EPLB_EXPERT_MAP_PATH", "").strip() or None
+)
+VLLM_EPLB_EXPERT_MAP_RECORD_PATH = (
+    os.environ.get("AREAL_AWEX_VLLM_EPLB_EXPERT_MAP_RECORD_PATH", "").strip() or None
+)
+VLLM_EPLB_POLICY_TYPE = _env_int("AREAL_AWEX_VLLM_EPLB_POLICY_TYPE", 1)
 VLLM_NUM_ENGINES = _env_int("AREAL_AWEX_VLLM_NUM_ENGINES", 1)
 NUM_UPDATES = _env_int("AREAL_AWEX_NUM_UPDATES", 1)
+VALIDATION_STEPS = _env_int("AREAL_AWEX_VALIDATION_STEPS", -1)
+VALIDATE_EVERY_N_STEPS = _env_int("AREAL_AWEX_VALIDATE_EVERY_N_STEPS", 1)
 REQUESTS_PER_UPDATE = _env_int("AREAL_AWEX_REQUESTS_PER_UPDATE", 0)
 REQUEST_TIMEOUT_S = _env_int("AREAL_AWEX_REQUEST_TIMEOUT_S", 30)
 REQUEST_RETRIES = _env_int("AREAL_AWEX_REQUEST_RETRIES", 3)
@@ -214,6 +233,51 @@ def _select_devices(
 
 def _train_world_size() -> int:
     return TRAIN_TP_SIZE * TRAIN_PP_SIZE * TRAIN_DP_SIZE * TRAIN_CP_SIZE
+
+
+def _build_ascend_eplb_config(base_config: dict | None) -> dict:
+    cfg = {
+        "dynamic_eplb": VLLM_EPLB_DYNAMIC,
+        "expert_heat_collection_interval": VLLM_EPLB_EXPERT_HEAT_COLLECTION_INTERVAL,
+        "algorithm_execution_interval": VLLM_EPLB_ALGORITHM_EXECUTION_INTERVAL,
+        "num_redundant_experts": VLLM_EPLB_NUM_REDUNDANT_EXPERTS,
+        "eplb_policy_type": VLLM_EPLB_POLICY_TYPE,
+    }
+    if VLLM_EPLB_EXPERT_MAP_PATH:
+        cfg["expert_map_path"] = VLLM_EPLB_EXPERT_MAP_PATH
+    if VLLM_EPLB_EXPERT_MAP_RECORD_PATH:
+        cfg["expert_map_record_path"] = VLLM_EPLB_EXPERT_MAP_RECORD_PATH
+    raw = base_config or {}
+    if "dynamic_eplb" in raw:
+        cfg["dynamic_eplb"] = bool(raw["dynamic_eplb"])
+    if "expert_heat_collection_interval" in raw:
+        cfg["expert_heat_collection_interval"] = int(
+            raw["expert_heat_collection_interval"]
+        )
+    if "algorithm_execution_interval" in raw:
+        cfg["algorithm_execution_interval"] = int(
+            raw["algorithm_execution_interval"]
+        )
+    # Backward-compatible mapping from GPU EPLB keys.
+    if (
+        "window_size" in raw
+        and "expert_heat_collection_interval" not in raw
+    ):
+        cfg["expert_heat_collection_interval"] = int(raw["window_size"])
+    if (
+        "step_interval" in raw
+        and "algorithm_execution_interval" not in raw
+    ):
+        cfg["algorithm_execution_interval"] = int(raw["step_interval"])
+    if "num_redundant_experts" in raw:
+        cfg["num_redundant_experts"] = int(raw["num_redundant_experts"])
+    if "expert_map_path" in raw and raw["expert_map_path"]:
+        cfg["expert_map_path"] = str(raw["expert_map_path"])
+    if "expert_map_record_path" in raw and raw["expert_map_record_path"]:
+        cfg["expert_map_record_path"] = str(raw["expert_map_record_path"])
+    if "eplb_policy_type" in raw:
+        cfg["eplb_policy_type"] = int(raw["eplb_policy_type"])
+    return cfg
 
 
 def _build_vllm_instances() -> list[dict]:
@@ -564,21 +628,40 @@ def _run_awex_integration(result_queue, model_path: str):
                         "data_parallel_size": inst.get("data_parallel_size"),
                         "enable_expert_parallel": inst.get("enable_expert_parallel"),
                     }
-                    if inst.get("enable_eplb"):
-                        vllm_extra_args["enable_eplb"] = True
-                        vllm_extra_args["eplb_config"] = json.dumps(
-                            inst.get("eplb_config") or {}
-                        )
-                    placement = inst.get("expert_placement_strategy")
-                    if placement:
-                        vllm_extra_args["expert_placement_strategy"] = placement
-                    vllm_args.update(vllm_extra_args)
                     vllm_env = {
                         _visible_env_name(device_backend): ",".join(
                             map(str, inst["devices"])
                         ),
                         **vllm_env_base,
                     }
+                    if inst.get("enable_eplb"):
+                        if device_backend == "npu":
+                            ascend_eplb_config = _build_ascend_eplb_config(
+                                inst.get("eplb_config")
+                            )
+                            vllm_extra_args["additional_config"] = json.dumps(
+                                {"eplb_config": ascend_eplb_config}
+                            )
+                            if (
+                                ascend_eplb_config.get("dynamic_eplb")
+                                or ascend_eplb_config.get(
+                                    "expert_map_record_path"
+                                )
+                            ):
+                                vllm_env["DYNAMIC_EPLB"] = "true"
+                            if ascend_eplb_config.get("expert_map_record_path"):
+                                vllm_env["EXPERT_MAP_RECORD"] = "true"
+                        else:
+                            vllm_extra_args["enable_eplb"] = True
+                            vllm_extra_args["eplb_config"] = json.dumps(
+                                inst.get("eplb_config") or {}
+                            )
+                    placement = inst.get("expert_placement_strategy")
+                    if placement and not (
+                        device_backend == "npu" and inst.get("enable_eplb")
+                    ):
+                        vllm_extra_args["expert_placement_strategy"] = placement
+                    vllm_args.update(vllm_extra_args)
                     cluster_id = inst.get("awex_cluster_id")
                     if cluster_id:
                         vllm_env["AWEX_CLUSTER_ID"] = str(cluster_id)
@@ -593,6 +676,13 @@ def _run_awex_integration(result_queue, model_path: str):
             inf_engine.initialize(addr=server_addrs)
             inf_engine.set_version(1)
 
+            if enable_validation:
+                validation_steps = (
+                    VALIDATION_STEPS if VALIDATION_STEPS >= 0 else max(1, NUM_UPDATES)
+                )
+            else:
+                validation_steps = 0
+
             update_meta = WeightUpdateMeta.from_awex(
                 meta_server_addr=meta_server_addr,
                 comm_backend=(
@@ -602,8 +692,8 @@ def _run_awex_integration(result_queue, model_path: str):
                 ),
                 # Force-disable MindSpeed for GPU runs; keep it enabled for NPU.
                 use_mindspeed=(device_backend == "npu"),
-                weights_validation_steps=1 if enable_validation else 0,
-                validate_weights_every_n_steps=1,
+                weights_validation_steps=validation_steps,
+                validate_weights_every_n_steps=max(1, VALIDATE_EVERY_N_STEPS),
                 enable_debug_mode=enable_validation,
                 debug_mode_config=(
                     {"raise_on_validation_fail": True} if enable_validation else {}
