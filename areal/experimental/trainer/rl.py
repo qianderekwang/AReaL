@@ -25,6 +25,8 @@ from areal.api.cli_args import (
 )
 from areal.api.engine_api import InferenceEngine
 from areal.api.io_struct import FinetuneSpec, StepInfo, WeightUpdateMeta
+from areal.utils.awex_runtime import prepare_awex_runtime
+from areal.utils.model import get_model_update_meta
 from areal.api.scheduler_api import Scheduler
 from areal.api.workflow_api import AgentWorkflow, WorkflowLike
 from areal.controller import RolloutController
@@ -65,6 +67,7 @@ class PPOTrainer:
             logging.setup_file_logging(StatsLogger.get_log_path(config.stats_logger))
 
         self.config = config
+        self._awex_runtime = prepare_awex_runtime(config)
         self.processor, self.tokenizer = load_hf_processor_and_tokenizer(
             config.tokenizer_path
         )
@@ -169,6 +172,8 @@ class PPOTrainer:
                         }
                     )
                 self.weight_update_meta = WeightUpdateMeta.from_fsdp_xccl(**xccl_kwargs)
+        elif self.config.actor.weight_update_mode == "awex":
+            self.weight_update_meta = get_model_update_meta(config)
         else:
             raise ValueError(
                 f"Invalid weight update mode: {self.config.actor.weight_update_mode}"
@@ -419,6 +424,7 @@ class PPOTrainer:
             self.critic.destroy()
         self.actor.destroy()
         perf_tracer.save(force=True)
+        self._awex_runtime.close()
 
     def _config_perf_tracer(self):
         rank = int(os.getenv("RANK", "0"))

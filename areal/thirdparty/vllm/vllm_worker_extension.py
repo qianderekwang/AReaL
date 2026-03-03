@@ -3,7 +3,12 @@ import traceback
 import torch
 import torch.distributed as dist
 from vllm.logger import init_logger
-from vllm.lora.models import LoRAModel
+try:
+    # vLLM <= 0.13.x
+    from vllm.lora.models import LoRAModel
+except ImportError:
+    # vLLM >= 0.14.x
+    from vllm.lora.lora_model import LoRAModel
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader import get_model_loader
