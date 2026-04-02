@@ -7,6 +7,10 @@ This directory contains two layers of offline evaluation utilities:
 2. `pass_at_k/`
    Read dumped JSONL records and aggregate dataset-level `pass@k`.
 
+If you write your own `eval_only.py`, see
+[eval_only/README.md](./eval_only/README.md) for the exact conditions under which a
+custom script will still produce JSONL that `pass_at_k` can consume directly.
+
 ## Typical Flow
 
 1. Run `eval_only` to generate dump files under:
