@@ -13,7 +13,8 @@ from .aggregator import (
     aggregate_task_metrics,
     aggregate_version_summaries,
 )
-from .plotting import plot_version_summaries
+from .metrics import parse_pass_metric_key
+from .plotting import PassKCurve, plot_pass_k_curves
 from .reader import load_eval_records
 
 
@@ -26,10 +27,30 @@ def _parse_ks(value: str | None) -> list[int] | None:
     return [int(item) for item in items]
 
 
+def _parse_labels(value: str | None, *, expected_count: int) -> list[str] | None:
+    if value is None:
+        return None
+    labels = [item.strip() for item in value.split(",") if item.strip()]
+    if len(labels) != expected_count:
+        raise ValueError(
+            f"--labels must provide exactly {expected_count} labels, got {len(labels)}"
+        )
+    return labels
+
+
+def _field_sort_key(field_name: str) -> tuple[int, Any]:
+    if field_name.startswith("pass@"):
+        return (1, parse_pass_metric_key(field_name))
+    return (0, field_name)
+
+
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
-    fieldnames = sorted({key for row in rows for key in row.keys()})
+    fieldnames = sorted(
+        {key for row in rows for key in row.keys()},
+        key=_field_sort_key,
+    )
     with path.open("w", encoding="utf-8", newline="") as fout:
         writer = csv.DictWriter(fout, fieldnames=fieldnames)
         writer.writeheader()
@@ -41,9 +62,31 @@ def _write_json(path: Path, payload: Any) -> None:
         json.dump(payload, fout, indent=2, sort_keys=True)
 
 
+def _default_source_label(source: str) -> str:
+    path = Path(source).expanduser()
+    if path.exists():
+        if path.is_file():
+            return path.stem
+        if path.name in {"eval-rollout", "rollout"} and path.parent.name:
+            return path.parent.name
+        if path.name:
+            return path.name
+    return source
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Aggregate eval-rollout dump into pass@k metrics.")
-    parser.add_argument("--source", required=True, help="JSONL file, directory, or glob to read.")
+    parser.add_argument(
+        "--source",
+        required=True,
+        nargs="+",
+        help="One or more JSONL files, directories, or globs to read.",
+    )
+    parser.add_argument(
+        "--labels",
+        default=None,
+        help="Comma-separated labels for --source entries when plotting or combining outputs.",
+    )
     parser.add_argument(
         "--ks",
         default=None,
@@ -82,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     ks = _parse_ks(args.ks)
+    labels = _parse_labels(args.labels, expected_count=len(args.source))
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else None
     emit_csv = args.emit_csv
     emit_json = args.emit_json
@@ -90,33 +134,69 @@ def main(argv: list[str] | None = None) -> int:
         emit_csv = True
         emit_json = True
 
-    records = load_eval_records(args.source, strict=args.strict)
-    task_metrics = aggregate_task_metrics(
-        records,
-        ks=ks,
-        success_threshold=args.success_threshold,
-        strict=args.strict,
-    )
-    summaries = aggregate_version_summaries(task_metrics)
+    all_summary_rows: list[dict[str, Any]] = []
+    all_task_rows: list[dict[str, Any]] = []
+    curves: list[PassKCurve] = []
+    multi_source = len(args.source) > 1
 
-    summary_rows = [summary.to_row() for summary in summaries]
-    task_rows = [metric.to_row() for metric in task_metrics]
+    for idx, source in enumerate(args.source):
+        label = labels[idx] if labels is not None else _default_source_label(source)
+        records = load_eval_records(source, strict=args.strict)
+        task_metrics = aggregate_task_metrics(
+            records,
+            ks=ks,
+            success_threshold=args.success_threshold,
+            strict=args.strict,
+        )
+        summaries = aggregate_version_summaries(task_metrics)
 
-    if summary_rows:
-        print(tabulate(summary_rows, headers="keys", tablefmt="github", floatfmt=".6f"))
+        for summary in summaries:
+            row = summary.to_row()
+            if multi_source:
+                row = {"source": label, **row}
+            all_summary_rows.append(row)
+
+        for metric in task_metrics:
+            row = metric.to_row()
+            if multi_source:
+                row = {"source": label, **row}
+            all_task_rows.append(row)
+
+        if args.plot:
+            if len(summaries) == 1:
+                curve_label = label
+                curves.append(
+                    PassKCurve(
+                        label=curve_label,
+                        pass_metrics=summaries[0].pass_metrics,
+                    )
+                )
+            else:
+                for summary in summaries:
+                    curves.append(
+                        PassKCurve(
+                            label=f"{label}@v{summary.tail_version}",
+                            pass_metrics=summary.pass_metrics,
+                        )
+                    )
+
+    if all_summary_rows:
+        print(
+            tabulate(all_summary_rows, headers="keys", tablefmt="github", floatfmt=".6f")
+        )
     else:
         print("No version summaries were produced.", file=sys.stderr)
 
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         if emit_csv:
-            _write_csv(output_dir / "summary.csv", summary_rows)
+            _write_csv(output_dir / "summary.csv", all_summary_rows)
         if emit_json:
-            _write_json(output_dir / "summary.json", summary_rows)
+            _write_json(output_dir / "summary.json", all_summary_rows)
         if emit_task_csv:
-            _write_csv(output_dir / "task_metrics.csv", task_rows)
+            _write_csv(output_dir / "task_metrics.csv", all_task_rows)
         if args.plot:
-            plot_version_summaries(summaries, output_dir / "pass_at_k.png")
+            plot_pass_k_curves(curves, output_dir / "pass_at_k.png")
 
     return 0
 

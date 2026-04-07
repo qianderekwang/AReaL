@@ -4,6 +4,17 @@ import math
 from collections.abc import Iterable, Sequence
 
 
+def parse_pass_metric_key(metric_key: str) -> int:
+    prefix = "pass@"
+    if not metric_key.startswith(prefix):
+        raise ValueError(f"Invalid pass@k metric key: {metric_key}")
+    return int(metric_key[len(prefix) :])
+
+
+def sort_pass_metric_keys(metric_keys: Iterable[str]) -> list[str]:
+    return sorted(metric_keys, key=parse_pass_metric_key)
+
+
 def estimate_pass_at_k(num_samples: int, num_correct: int, k: int) -> float:
     if num_samples < 0:
         raise ValueError(f"num_samples must be non-negative, got {num_samples}")
@@ -114,6 +125,6 @@ def aggregate_pass_at_k_over_dataset(
 
     return {
         key: totals[key] / counts[key]
-        for key in sorted(totals.keys())
+        for key in sort_pass_metric_keys(totals.keys())
         if counts[key] > 0
     }

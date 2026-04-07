@@ -39,6 +39,35 @@ python -m offline_eval.pass_at_k.cli \
   --plot
 ```
 
+The generated plot uses:
+
+- x-axis: `k`
+- y-axis: `pass@k`
+
+If one source contains multiple `tail_version` summaries, each version is plotted as a
+separate curve.
+
+## Plot Multiple Experiments Together
+
+```bash
+python -m offline_eval.pass_at_k.cli \
+  --source \
+    /tmp/exp_a/eval-rollout \
+    /tmp/exp_b/eval-rollout \
+  --labels exp_a,exp_b \
+  --output-dir /tmp/pass_at_k_compare \
+  --emit-csv \
+  --emit-json \
+  --plot
+```
+
+When multiple sources are provided:
+
+- the CLI prints and exports a combined summary table
+- `summary.csv` / `summary.json` include a `source` column
+- the plot overlays one curve per source, or one curve per `(source, tail_version)`
+  when a source contains multiple versions
+
 ## Key Flags
 
 - `--ks 1,2,4,8`
